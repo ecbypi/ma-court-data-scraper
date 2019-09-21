@@ -1,0 +1,112 @@
+#!/usr/bin/env ruby
+
+require "byebug"
+require "pry"
+require "net/https"
+
+require "bundler/inline"
+
+gemfile do
+  gem "dotenv"
+  gem "capybara"
+  gem "selenium-webdriver"
+end
+
+Capybara.configure do |config|
+  config.default_driver = :selenium_chrome
+  config.default_max_wait_time = 10
+end
+
+require "capybara/dsl"
+
+Dotenv.load
+
+class Scraper
+  include Capybara::DSL
+
+  def run
+    # Visit the home page
+    $stdout.puts "SETUP: Opening Tableau Dashboard"
+    visit ENV["DASHBOARD_URL"]
+
+    browser = page.driver.browser
+
+    # Select 2018 crimes
+    $stdout.puts "SETUP: Selecting 2018 data"
+    find(".tabComboBoxNameContainer", text: "FY 2019").click
+    find("a", text: "FY 2018").click
+
+    # Wait for the 2018 data to load
+    $stdout.puts "SETUP: Waiting 16 seconds for 2018 data to load"
+    sleep 16
+
+    # Grab a reference to all canvas elements on the page
+    $stdout.puts "SETUP: Finding canvas element with list of charges"
+    canvas_elements = all("canvas.tabCanvas")
+
+    # The top-level list of all charges is the 3rd (2nd index)
+    charges_canvas = canvas_elements[2]
+
+    # Calculate the element's position
+    charges_canvas_position = charges_canvas.evaluate_script("this.getBoundingClientRect()", charges_canvas)
+
+    charges_per_page = 27.0 # manually counted
+
+    charges_canvas_height = (charges_canvas_position["bottom"] - charges_canvas_position["top"])
+    charges_row_height = charges_canvas_height / charges_per_page
+
+    charges_canvas_x = charges_canvas_position["left"]
+    charges_canvas_y = charges_canvas_position["top"]
+
+    $stdout.puts "SETUP: Moving cursor to top left of canvas element"
+    browser.action.move_to_location(charges_canvas_x, charges_canvas_y).perform
+
+    $stdout.puts
+
+    y_offset = 2
+    # The first page (for now)
+    (0..26).each do |index|
+      $stdout.puts "PULLING ##{index}: Clicking on row at index #{index}, at #{y_offset} down from top of canvas"
+      # Click the row
+      browser.action.move_to_location(charges_canvas_x, charges_canvas_y + y_offset).click.perform
+
+      # Wait for the data for that charge to load
+      $stdout.puts "PULLING ##{index}: Waiting 11 seconds for data to load"
+      sleep 11
+
+      # Click the download button
+      $stdout.puts "PULLING ##{index}: Opening download dialogue"
+      find(".tabToolbarButton", text: "Download", visible: false).click
+
+      # Choose 'PDF' as the option
+      $stdout.puts "PULLING ##{index}: Choosing PDF from dialogue"
+      find("[data-tb-test-id='DownloadPdf-Button'][aria-disabled=false]").click
+
+      # The modal to pick what to render is shown. For now use the defaults and click 'Create Pdf'
+      $stdout.puts "PULLING ##{index}: Using default PDF options and generating"
+      find("[data-tb-test-id='PdfDialogCreatePdf-Button'][aria-disabled=false]").click
+
+      download_link = find("a", text: "Download", wait: 20)
+      url = download_link[:href]
+
+      $stdout.puts "PULLING ##{index}: Downloading PDF to #{index}.pdf"
+      File.open("#{index}.pdf", "w") { |f| f.write Net::HTTP.get URI.parse(url) }
+
+      $stdout.puts "PULLING ##{index}: Closing download dialogue"
+      find("[data-tb-test-id='CancelBtn-Button']").click
+
+      $stdout.puts "PULLING ##{index}: Scrolling viewport back to default position"
+      execute_script %{window.scrollTo(0, 0)}
+
+      y_offset += charges_row_height
+
+      $stdout.puts
+    end
+  end
+end
+
+begin
+  Scraper.new.run
+rescue Exception => e
+  binding.pry
+end
